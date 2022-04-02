@@ -3,28 +3,26 @@
 #include <SPI.h>
 #include <RTClib.h>
 
-RTC_DS3231 rtc;
-
 // For the breakout board, you can use any 2 or 3 pins.
 // These pins will also work for the 1.8" TFT shield.
 #define TFT_CS 10
 #define TFT_RST 9 // Or set to -1 and connect to Arduino RESET pin
 #define TFT_DC 8
 
-Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-
-const DateTime birthdatePlus9Years = DateTime(2000, 6, 11, 16, 24, 0);
+const DateTime birthdate = DateTime(2000, 6, 11, 16, 24, 0);
 const DateTime deathdate = DateTime(2031, 6, 11, 16, 24, 0); // big 4-0
-
-float p = 3.1415926;
+// Needed cuz i'm old (9 years before Y2000)
+const auto nineYears = TimeSpan(3285, 0, 0, 0);
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 170
 
-#define DIGIT_WIDTH 50
-#define DIGIT_HEIGHT 90
+// Bright, but pleasant, cyan color
 #define DIGIT_COLOR 0x07f9
+// Dim, but still pleasant, cyan color
 #define DIGIT_SHADOW_COLOR 0x0022
+
+// Types
 
 struct DrawableDigit
 {
@@ -39,20 +37,257 @@ struct DrawableDigit
     bool botRightVbar;
 };
 
-const DrawableDigit digits[12] = {
-    DrawableDigit{true, false, true, true, true, true, true},
-    DrawableDigit{false, false, false, false, false, true, true},
-    DrawableDigit{true, true, true, false, true, true, false},
-    DrawableDigit{true, true, true, false, false, true, true},
-    DrawableDigit{false, true, false, true, false, true, true},
-    DrawableDigit{true, true, true, true, false, false, true},
-    DrawableDigit{true, true, true, true, true, false, true},
-    DrawableDigit{true, false, false, false, false, true, true},
-    DrawableDigit{true, true, true, true, true, true, true},
-    DrawableDigit{true, true, true, true, false, true, true},       // 9
-    DrawableDigit{false, false, false, false, false, false, false}, // empty
-    DrawableDigit{false, true, false, false, false, false, false}   // -
+struct DigitSize
+{
+    // The long-end of a digit bar
+    uint8_t barLength = 20;
+    // The small-end of a digit bar
+    uint8_t barWidth = 6;
+    // The space between digit bars
+    uint8_t lanePadding = 3;
+    // The total width of a lane, including long-end of digit bar including padding
+    uint8_t laneWidth = barWidth + lanePadding;
+    // Entire width of a single digit
+    uint8_t digitWidth = laneWidth * 2 + barLength + lanePadding * 2;
+    // Entire height of a single digit
+    uint8_t digitHeight = laneWidth * 3 + (barLength + lanePadding) * 2;
 };
+
+const DigitSize &digitSize = DigitSize();
+
+enum class ModeSelection
+{
+    HOURS,
+    DAYS,
+};
+
+// Digit lookup
+const DrawableDigit digits[12] = {
+    DrawableDigit{true, false, true, true, true, true, true},       // 0
+    DrawableDigit{false, false, false, false, false, true, true},   // 1
+    DrawableDigit{true, true, true, false, true, true, false},      // 2
+    DrawableDigit{true, true, true, false, false, true, true},      // 3
+    DrawableDigit{false, true, false, true, false, true, true},     // 4
+    DrawableDigit{true, true, true, true, false, false, true},      // 5
+    DrawableDigit{true, true, true, true, true, false, true},       // 6
+    DrawableDigit{true, false, false, false, false, true, true},    // 7
+    DrawableDigit{true, true, true, true, true, true, true},        // 8
+    DrawableDigit{true, true, true, true, false, true, true},       // 9
+    DrawableDigit{false, false, false, false, false, false, false}, // blank
+    DrawableDigit{false, true, false, false, false, false, false}   // - (hypen)
+};
+
+ModeSelection selectedMode = ModeSelection::HOURS;
+RTC_DS3231 rtc;
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+void refreshTft()
+{
+    DateTime now = rtc.now();
+    const uint32_t remainingTimeSeconds = deathdate.unixtime() - now.unixtime();
+    const TimeSpan &remainingTimeSpan = TimeSpan(remainingTimeSeconds);
+    const uint32_t hoursRemaining = ((uint32_t)remainingTimeSpan.days() * 24) + (uint32_t)remainingTimeSpan.hours();
+
+    uint32_t startTime = millis();
+    switch (selectedMode)
+    {
+    case ModeSelection::HOURS:
+        drawDigits(hoursRemaining);
+        break;
+
+    case ModeSelection::DAYS:
+        drawDigits(remainingTimeSpan.days());
+        break;
+    }
+    uint32_t stopTime = millis();
+    Serial.print("Digit draw took ");
+    Serial.print(stopTime - startTime);
+    Serial.println(" ms");
+
+    const float currentAgeSeconds = (now.unixtime() - birthdate.unixtime()) + nineYears.totalseconds();
+    const float deathDateSeconds = deathdate.unixtime() - birthdate.unixtime() + nineYears.totalseconds();
+
+    startTime = millis();
+    drawProgressBar(1.0f - (currentAgeSeconds / deathDateSeconds));
+    stopTime = millis();
+    Serial.print("Progbar draw took ");
+    Serial.print(stopTime - startTime);
+    Serial.println(" ms");
+}
+
+void drawProgressBar(const float percent)
+{
+    Serial.print("Percentage: ");
+    Serial.println(percent);
+
+    const uint16_t startX = digitSize.lanePadding;
+    const uint16_t startY = SCREEN_HEIGHT - digitSize.lanePadding - digitSize.barWidth;
+
+    const float maxProgBarLength = SCREEN_WIDTH - digitSize.lanePadding * 2;
+    tft.fillRect(startX - 1, startY - 1, maxProgBarLength + 2, digitSize.barWidth + 2, DIGIT_SHADOW_COLOR);
+
+    const float progBarLength = percent * (maxProgBarLength - digitSize.lanePadding);
+    tft.fillRect(startX, startY, startX + progBarLength, digitSize.barWidth - 1, DIGIT_COLOR);
+
+    tft.setCursor(progBarLength, startY - 10);
+    tft.setTextSize(1);
+    tft.setTextColor(DIGIT_COLOR);
+    tft.print(percent * 100);
+    tft.print("% remaining life");
+}
+
+const uint16_t digitYOffs = (SCREEN_HEIGHT - digitSize.digitHeight) / 2;
+const uint8_t maxNumDigits = 5;
+
+void drawDigits(const uint32_t num)
+{
+    const String numStr = String(num);
+
+    for (int i = maxNumDigits; i >= 0; --i)
+    {
+        int index;
+        if (i < numStr.length())
+        {
+            index = numStr[numStr.length() - 1 - i] - '0';
+        }
+        else if (i == numStr.length())
+        {
+            // Draw a negative-sign. Really make the number sink in
+            index = 11;
+        }
+        else
+        {
+            // Draw a blank digit for that good ole classic digital clock feel
+            index = 10;
+        }
+
+        const uint16_t startX = (digitSize.digitWidth + digitSize.lanePadding) * (maxNumDigits - i);
+        const uint16_t startY = digitYOffs;
+
+        paintDigit(digits[index], startX, startY);
+    }
+
+    // Render mode selection
+
+    // hours mode
+    tft.setCursor(
+        SCREEN_WIDTH - 34,
+        digitYOffs + digitSize.digitHeight - digitSize.barLength - digitSize.lanePadding * 2);
+    tft.setTextSize(1);
+
+    if (selectedMode == ModeSelection::HOURS)
+    {
+        tft.setTextColor(DIGIT_COLOR);
+    }
+    else
+    {
+        tft.setTextColor(DIGIT_SHADOW_COLOR);
+    }
+    tft.print("hours");
+
+    // days mode
+    tft.setCursor(
+        SCREEN_WIDTH - 30,
+        digitYOffs + digitSize.digitHeight - digitSize.barLength + digitSize.lanePadding * 2);
+
+    if (selectedMode == ModeSelection::DAYS)
+    {
+        tft.setTextColor(DIGIT_COLOR);
+    }
+    else
+    {
+        tft.setTextColor(DIGIT_SHADOW_COLOR);
+    }
+    tft.print("days");
+}
+
+void paintHBar(uint16_t startX, uint16_t startY, uint16_t color)
+{
+    tft.fillTriangle(
+        startX - digitSize.lanePadding, startY + digitSize.lanePadding,
+        startX, startY,
+        startX, startY + digitSize.barWidth - 1, color);                // left tri
+    tft.fillRect(startX, startY, digitSize.barLength, digitSize.barWidth, color); //  vbar
+    tft.fillTriangle(
+        startX + digitSize.barLength + digitSize.lanePadding, startY + digitSize.lanePadding,
+        startX + digitSize.barLength, startY,
+        startX + digitSize.barLength, startY + digitSize.barWidth - 1, color); // right triangle
+}
+
+void paintVBar(uint16_t startX, uint16_t startY, uint16_t color)
+{
+    tft.fillTriangle(
+        startX + digitSize.barWidth / 2, startY - digitSize.lanePadding,
+        startX, startY,
+        startX + digitSize.barWidth - 1, startY, color);                // top tri
+    tft.fillRect(startX, startY, digitSize.barWidth, digitSize.barLength, color); // hbar
+    tft.fillTriangle(
+        startX + digitSize.barWidth / 2, startY + digitSize.barLength + digitSize.lanePadding,
+        startX, startY + digitSize.barLength,
+        startX + digitSize.barWidth - 1, startY, color); // bot triangle
+}
+
+void paintDigit(const DrawableDigit digit, uint16_t startX, uint16_t startY)
+{
+    if (digit.topHbar)
+    {
+        paintHBar(startX + digitSize.laneWidth, startY, DIGIT_COLOR);
+    }
+    else
+    {
+        paintHBar(startX + digitSize.laneWidth, startY, DIGIT_SHADOW_COLOR);
+    }
+    if (digit.midHbar)
+    {
+        paintHBar(startX + digitSize.laneWidth, startY + digitSize.barLength + digitSize.laneWidth + 1, DIGIT_COLOR);
+    }
+    else
+    {
+        paintHBar(startX + digitSize.laneWidth, startY + digitSize.barLength + digitSize.laneWidth + 1, DIGIT_SHADOW_COLOR);
+    }
+    if (digit.botHbar)
+    {
+        paintHBar(startX + digitSize.laneWidth, startY + (digitSize.barLength + digitSize.laneWidth + 1) * 2, DIGIT_COLOR);
+    }
+    else
+    {
+        paintHBar(startX + digitSize.laneWidth, startY + (digitSize.barLength + digitSize.laneWidth + 1) * 2, DIGIT_SHADOW_COLOR);
+    }
+
+    if (digit.topLeftVbar)
+    {
+        paintVBar(startX, startY + digitSize.laneWidth, DIGIT_COLOR);
+    }
+    else
+    {
+        paintVBar(startX, startY + digitSize.laneWidth, DIGIT_SHADOW_COLOR);
+    }
+    if (digit.botLeftVbar)
+    {
+        paintVBar(startX, startY + digitSize.laneWidth * 2 + digitSize.barLength, DIGIT_COLOR);
+    }
+    else
+    {
+        paintVBar(startX, startY + digitSize.laneWidth * 2 + digitSize.barLength, DIGIT_SHADOW_COLOR);
+    }
+
+    if (digit.topRightVbar)
+    {
+        paintVBar(startX + digitSize.laneWidth + digitSize.barLength + digitSize.lanePadding, startY + digitSize.laneWidth, DIGIT_COLOR);
+    }
+    else
+    {
+        paintVBar(startX + digitSize.laneWidth + digitSize.barLength + digitSize.lanePadding, startY + digitSize.laneWidth, DIGIT_SHADOW_COLOR);
+    }
+    if (digit.botRightVbar)
+    {
+        paintVBar(startX + digitSize.laneWidth + digitSize.barLength + digitSize.lanePadding, startY + digitSize.barLength + digitSize.laneWidth * 2, DIGIT_COLOR);
+    }
+    else
+    {
+        paintVBar(startX + digitSize.laneWidth + digitSize.barLength + digitSize.lanePadding, startY + digitSize.barLength + digitSize.laneWidth * 2, DIGIT_SHADOW_COLOR);
+    }
+}
 
 void setup(void)
 {
@@ -65,6 +300,7 @@ void setup(void)
 
     Serial.println("Setting up Tft display");
     setupTftDisplay();
+    tft.fillScreen(ST77XX_BLACK);
 
     Serial.println("Set up complete");
 }
@@ -94,8 +330,7 @@ void setupRtc()
 void setupTftDisplay()
 {
     tft.init(SCREEN_HEIGHT, SCREEN_WIDTH);
-    tft.setRotation(1);
-    Serial.println(F("ST7789 Initialized"));
+    tft.setRotation(1); // Horizontal display. logic as-is does not support vertical display cleanly
 
     tft.fillScreen(ST77XX_BLACK);
     tft.setCursor(25, SCREEN_HEIGHT / 2);
@@ -108,211 +343,13 @@ void setupTftDisplay()
 
 void loop()
 {
+    uint32_t startTime = millis();
     refreshTft();
+    uint32_t stopTime = millis();
+    Serial.print("Total screen draw took ");
+    Serial.print(stopTime - startTime);
+    Serial.println(" ms");
+    
+    
     delay(15000);
-}
-
-const uint8_t barLength = 20;
-const uint8_t barWidth = 6;
-// bars occupy lanes within this width
-const uint8_t lanePadding = 3;
-const uint8_t laneWidth = barWidth + lanePadding;
-
-const uint8_t digitWidth = laneWidth * 2 + barLength + lanePadding * 2;
-const uint8_t digitHeight = laneWidth * 3 + (barLength + lanePadding) * 2;
-
-enum class ModeSelection
-{
-    HOURS,
-    DAYS,
-};
-
-ModeSelection selectedMode = ModeSelection::DAYS;
-
-void refreshTft()
-{
-    tft.fillScreen(ST77XX_BLACK);
-
-    DateTime now = rtc.now();
-    const uint32_t remainingTimeSeconds = deathdate.unixtime() - now.unixtime();
-    const TimeSpan &remainingTimeSpan = TimeSpan(remainingTimeSeconds);
-    const uint32_t hoursRemaining = ((uint32_t)remainingTimeSpan.days() * 24) + (uint32_t)remainingTimeSpan.hours();
-
-    switch (selectedMode)
-    {
-    case ModeSelection::HOURS:
-        drawDigits(hoursRemaining);
-        break;
-
-    case ModeSelection::DAYS:
-        drawDigits(remainingTimeSpan.days());
-        break;
-    }
-
-    const auto nineYears = TimeSpan(3285, 0, 0, 0);
-    const float currentAgeSeconds = (now.unixtime() - birthdatePlus9Years.unixtime()) + nineYears.totalseconds();
-    const float deathDateSeconds = deathdate.unixtime() - birthdatePlus9Years.unixtime() + nineYears.totalseconds();
-
-    drawProgressBar(1.0f - (currentAgeSeconds / deathDateSeconds));
-}
-
-void drawProgressBar(const float percent)
-{
-    Serial.print("Percentage: ");
-    Serial.println(percent);
-
-    const uint16_t startX = lanePadding;
-    const uint16_t startY = SCREEN_HEIGHT - lanePadding - barWidth;
-
-    const float maxProgBarLength = SCREEN_WIDTH - lanePadding * 2;
-    tft.fillRect(startX - 1, startY - 1, maxProgBarLength + 2, barWidth + 2, DIGIT_SHADOW_COLOR);
-
-    const float progBarLength = percent * (maxProgBarLength - lanePadding);
-    tft.fillRect(startX, startY, startX + progBarLength, barWidth - 1, DIGIT_COLOR);
-
-    tft.setCursor(progBarLength, startY - 10);
-    tft.setTextSize(1);
-    tft.setTextColor(DIGIT_COLOR);
-    tft.print(percent * 100);
-    tft.print("% remaining life");
-}
-
-const uint16_t digitXOffs = DIGIT_WIDTH;
-const uint16_t digitYOffs = (SCREEN_HEIGHT - digitHeight) / 2;
-const uint8_t maxNumDigits = 5;
-
-void drawDigits(uint32_t num)
-{
-    String numStr = String(num);
-
-    for (int i = maxNumDigits; i >= 0; --i)
-    {
-        int index;
-        if (i < numStr.length())
-        {
-            index = numStr[numStr.length() - 1 - i] - '0';
-        }
-        else if (i == numStr.length()) {
-            index = 11;
-        }
-        else
-        {
-            index = 10;
-        }
-        paintDigit(digits[index], (digitWidth + lanePadding) * (maxNumDigits - i), digitYOffs);
-    }
-
-    // hours mode
-    tft.setCursor(SCREEN_WIDTH - 34, digitYOffs + digitHeight - barLength - lanePadding * 2);
-    tft.setTextSize(1);
-    if (selectedMode == ModeSelection::HOURS)
-    {
-        tft.setTextColor(DIGIT_COLOR);
-    }
-    else
-    {
-        tft.setTextColor(DIGIT_SHADOW_COLOR);
-    }
-    tft.print("hours");
-
-    // days mode
-    tft.setCursor(SCREEN_WIDTH - 30, digitYOffs + digitHeight - barLength + lanePadding * 2);
-    tft.setTextSize(1);
-    if (selectedMode == ModeSelection::DAYS)
-    {
-        tft.setTextColor(DIGIT_COLOR);
-    }
-    else
-    {
-        tft.setTextColor(DIGIT_SHADOW_COLOR);
-    }
-    tft.print("days");
-}
-
-void paintHBar(uint16_t startX, uint16_t startY, uint16_t color)
-{
-    tft.fillTriangle(
-        startX - lanePadding, startY + lanePadding,
-        startX, startY,
-        startX, startY + barWidth - 1, color);                // left tri
-    tft.fillRect(startX, startY, barLength, barWidth, color); //  vbar
-    tft.fillTriangle(
-        startX + barLength + lanePadding, startY + lanePadding,
-        startX + barLength, startY,
-        startX + barLength, startY + barWidth - 1, color); // right triangle
-}
-
-void paintVBar(uint16_t startX, uint16_t startY, uint16_t color)
-{
-    tft.fillTriangle(
-        startX + barWidth / 2, startY - lanePadding,
-        startX, startY,
-        startX + barWidth - 1, startY, color);                // top tri
-    tft.fillRect(startX, startY, barWidth, barLength, color); // hbar
-    tft.fillTriangle(
-        startX + barWidth / 2, startY + barLength + lanePadding,
-        startX, startY + barLength,
-        startX + barWidth - 1, startY, color); // bot triangle
-}
-
-void paintDigit(const DrawableDigit digit, uint16_t startX, uint16_t startY)
-{
-    if (digit.topHbar)
-    {
-        paintHBar(startX + laneWidth, startY, DIGIT_COLOR);
-    }
-    else
-    {
-        paintHBar(startX + laneWidth, startY, DIGIT_SHADOW_COLOR);
-    }
-    if (digit.midHbar)
-    {
-        paintHBar(startX + laneWidth, startY + barLength + laneWidth + 1, DIGIT_COLOR);
-    }
-    else
-    {
-        paintHBar(startX + laneWidth, startY + barLength + laneWidth + 1, DIGIT_SHADOW_COLOR);
-    }
-    if (digit.botHbar)
-    {
-        paintHBar(startX + laneWidth, startY + (barLength + laneWidth + 1) * 2, DIGIT_COLOR);
-    }
-    else
-    {
-        paintHBar(startX + laneWidth, startY + (barLength + laneWidth + 1) * 2, DIGIT_SHADOW_COLOR);
-    }
-
-    if (digit.topLeftVbar)
-    {
-        paintVBar(startX, startY + laneWidth, DIGIT_COLOR);
-    }
-    else
-    {
-        paintVBar(startX, startY + laneWidth, DIGIT_SHADOW_COLOR);
-    }
-    if (digit.botLeftVbar)
-    {
-        paintVBar(startX, startY + laneWidth * 2 + barLength, DIGIT_COLOR);
-    }
-    else
-    {
-        paintVBar(startX, startY + laneWidth * 2 + barLength, DIGIT_SHADOW_COLOR);
-    }
-
-    if (digit.topRightVbar)
-    {
-        paintVBar(startX + laneWidth + barLength + lanePadding, startY + laneWidth, DIGIT_COLOR);
-    }
-    else
-    {
-        paintVBar(startX + laneWidth + barLength + lanePadding, startY + laneWidth, DIGIT_SHADOW_COLOR);
-    }
-    if (digit.botRightVbar)
-    {
-        paintVBar(startX + laneWidth + barLength + lanePadding, startY + barLength + laneWidth * 2, DIGIT_COLOR);
-    }
-    else
-    {
-        paintVBar(startX + laneWidth + barLength + lanePadding, startY + barLength + laneWidth * 2, DIGIT_SHADOW_COLOR);
-    }
 }
